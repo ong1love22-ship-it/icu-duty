@@ -3,61 +3,76 @@ import pandas as pd
 import pulp
 import os
 
-# 1. 화면이 잘 작동하는지 확인용 (이건 무조건 떠야 합니다)
 st.set_page_config(page_title="MICU 근무표", layout="wide")
-st.title("🏥 MICU 근무표 생성 시스템 (진단 모드)")
+st.title("🏥 MICU AI 근무표 (최종 복구 버전)")
 
-# 2. 로그인 세션 관리
-if "logged_in" not in st.session_state:
-    st.session_state.logged_in = False
+# 1. 비밀번호 확인
+if "auth" not in st.session_state:
+    st.session_state.auth = False
 
-if not st.session_state.logged_in:
-    pw = st.text_input("비밀번호 입력 (1234)", type="password")
+if not st.session_state.auth:
+    pw = st.text_input("비밀번호 (1234)", type="password")
     if st.button("로그인"):
         if pw == "1234":
-            st.session_state.logged_in = True
+            st.session_state.auth = True
             st.rerun()
         else:
             st.error("비밀번호가 틀렸습니다.")
     st.stop()
 
-# 3. 데이터 로드 확인
-st.write("---")
-st.subheader("1단계: 파일 연결 확인")
+# 2. 파일 로드 및 확인
 file_path = 'request_off.xlsx'
-
-if os.path.exists(file_path):
-    st.success(f"✅ '{file_path}' 파일을 찾았습니다!")
-    # 파일 내용을 살짝 보여줌 (잘 읽히는지 확인용)
-    test_df = pd.read_excel(file_path)
-    st.write(f"현재 등록된 간호사 수: {len(test_df)}명")
-else:
-    st.error(f"❌ '{file_path}' 파일이 깃허브에 없습니다. 파일명을 확인해주세요!")
+if not os.path.exists(file_path):
+    st.error(f"❌ '{file_path}' 파일이 깃허브에 없습니다! 파일을 먼저 올려주세요.")
     st.stop()
 
-# 4. 버튼 클릭 및 AI 계산
-st.subheader("2단계: AI 계산 시작")
+# 3. 근무표 생성 로직
 if st.button("근무표 생성 시작"):
-    st.info("AI가 계산을 시작했습니다. 잠시만 기다려주세요...")
-    
     try:
-        # 여기에 수간호사님의 PuLP 로직이 들어갑니다.
-        # ... (생략된 PuLP 로직) ...
+        df_input = pd.read_excel(file_path)
+        nurses = df_input.iloc[:, 0].dropna().tolist()
+        skill = dict(zip(nurses, df_input.iloc[:, 1]))
         
-        # 계산 시도
-        prob = pulp.LpProblem("Nurse_Scheduling", pulp.LpMinimize)
-        # (변수 및 제약조건 설정 부분...)
+        days = range(1, 31)
+        shifts = ['D', 'E', 'N', 'OFF']
         
-        # 진단을 위해 결과 강제 출력
-        st.write("계산기 가동 중...")
-        
-        # 만약 여기서 화면이 멈춘다면 제약조건이 너무 까다로운 것입니다.
-        # 테스트를 위해 아주 단순한 결과라도 나오게 해보겠습니다.
-        st.success("🎉 드디어 계산이 완료되었습니다!")
-        # 결과 표 출력 코드...
-        
-    except Exception as e:
-        st.error(f"⚠️ 실행 중 오류 발생: {e}")
+        # 문제 정의
+        prob = pulp.LpProblem("Nurse_Schedule", pulp.LpMinimize)
+        x = pulp.LpVariable.dicts("x", (nurses, days, shifts), cat=pulp.LpBinary)
 
-st.write("---")
-st.write("화면 하단에 이 글자가 보인다면 앱이 정상 작동 중입니다.")
+        # [제약조건] 가장 필수적인 것만 남기고 다 풀었습니다 (작동 확인용)
+        for d in days:
+            prob += pulp.lpSum([x[n][d]['D'] for n in nurses]) == 4
+            prob += pulp.lpSum([x[n][d]['E'] for n in nurses]) == 5
+            prob += pulp.lpSum([x[n][d]['N'] for n in nurses]) == 4
+
+        for n in nurses:
+            for d in days:
+                prob += pulp.lpSum([x[n][d][s] for s in shifts]) == 1
+                # 나이트-데이 금지만 남김
+                if d < 30:
+                    prob += x[n][d]['N'] + x[n][d+1]['D'] <= 1
+
+        # 계산 실행
+        status = prob.solve(pulp.PULP_CBC_CMD(msg=0))
+        
+        if pulp.LpStatus[status] == 'Optimal':
+            res = []
+            for n in nurses:
+                row = {'이름': n}
+                for d in days:
+                    for s in shifts:
+                        if pulp.value(x[n][d][s]) == 1:
+                            row[f"{d}일"] = s
+                res.append(row)
+            
+            final_df = pd.DataFrame(res)
+            st.success("✅ 근무표 생성에 성공했습니다!")
+            st.dataframe(final_df)
+        else:
+            st.error(f"❌ AI가 답을 못 찾음 (상태: {pulp.LpStatus[status]})")
+            st.warning("팁: 근무 인원(4,5,4)을 조정하거나 제약을 더 풀어야 합니다.")
+
+    except Exception as e:
+        st.error(f"⚠️ 시스템 오류 발생: {e}")
+        st.info("이 에러가 뜨면 'requirements.txt'에 pulp, openpyxl이 있는지 확인하세요.")
